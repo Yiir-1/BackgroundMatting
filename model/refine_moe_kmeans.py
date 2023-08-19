@@ -29,9 +29,9 @@ class MoE_kmeans(nn.Module):
                            model_refine_sample_pixels,
                            model_refine_thresholding,
                            model_refine_kernel_size)for i in range(num_experts)])
-        self.df=pd.read_csv('bg_clusters_valid_process.csv')
+        self.df=pd.read_csv('bg_clusters_valid.csv')
 
     def forward(self, src, bgr,name):
-        label=self.df[self.df['name']==str(name)]['clusters']
+        label=self.df[self.df['name']==str(name)]['label']
         pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, pred_ref_sm = self.experts[label.values[0]](src, bgr)
         return pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, pred_ref_sm

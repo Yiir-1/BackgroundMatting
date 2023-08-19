@@ -215,10 +215,8 @@ def train_worker(rank, addr, port):
             del aug_affine_idx
 
             with autocast():
-
                 pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model_distributed(true_src,
                                                                                                  true_bgr, names)
-
                 loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha,
                                     true_fgr)
                 scaler.scale(loss).backward()
@@ -280,29 +278,6 @@ def random_crop(*imgs):
         img = kornia.center_crop(img, (H_tgt, W_tgt))
         results.append(img)
     return results
-
-
-def valid(model, dataloader, writer, step):
-    model.eval()
-    loss_total = 0
-    loss_count = 0
-    with torch.no_grad():
-        for (true_pha, true_fgr), true_bgr in dataloader:
-            batch_size = true_pha.size(0)
-
-            true_pha = true_pha.cuda(non_blocking=True)
-            true_fgr = true_fgr.cuda(non_blocking=True)
-            true_bgr = true_bgr.cuda(non_blocking=True)
-            true_src = true_pha * true_fgr + (1 - true_pha) * true_bgr
-
-            pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model(true_src, true_bgr)
-            loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha, true_fgr)
-            loss_total += loss.cpu().item() * batch_size
-            loss_count += batch_size
-
-    writer.add_scalar('valid_loss', loss_total / loss_count, step)
-    model.train()
-
 
 # --------------- Start ---------------
 

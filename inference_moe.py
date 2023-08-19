@@ -48,14 +48,14 @@ parser.add_argument('--model-refine-sample-pixels', type=int, default=80_000)
 parser.add_argument('--model-refine-kernel-size', type=int, default=3)
 parser.add_argument('--model-refine-thresholding', type=float, default=0.7)
 parser.add_argument('--images-src', type=str, default='evaldata/img')
-parser.add_argument('--images-bgr', type=str, default='evaldata/bgr1')
+parser.add_argument('--images-bgr', type=str, default='evaldata/bgr')
 
 parser.add_argument('--device', type=str, choices=['cpu', 'cuda'], default='cuda')
 parser.add_argument('--num-workers', type=int, default=0,
                     help='number of worker threads used in DataLoader. Note that Windows need to use single thread (0).')
 parser.add_argument('--preprocess-alignment', action='store_true')
 
-parser.add_argument('--output-dir', type=str, default='output')
+parser.add_argument('--output-dir', type=str, default='output1')
 parser.add_argument('--output-types', type=str, required=True, nargs='+', choices=['com', 'pha', 'fgr', 'err', 'ref'])
 parser.add_argument('-y', action='store_true')
 parser.add_argument('--num-experts',type=int, default=3)
@@ -86,7 +86,7 @@ dataset = ZipDataset([
     ImagesDataset(args.images_bgr),
 ], assert_equal_length=True, transforms=A.PairCompose([
     A.PairResize((1936,1808)),
-    HomographicAlignment() if args.preprocess_alignment else A.PairApply(nn.Identity()),
+    HomographicAlignment() ,
     A.PairApply(T.ToTensor())
 ]))
 dataloader = DataLoader(dataset, batch_size=1, num_workers=args.num_workers, pin_memory=True)
