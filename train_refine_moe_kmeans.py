@@ -6,7 +6,13 @@ Select GPUs through CUDA_VISIBLE_DEVICES environment variable.
 
 Example:
 
-CUDA_VISIBLE_DEVICES=0,1 python trainrefine_moe.py         --dataset-name videomatte240k         --model-backbone resnet50         --model-name mattingrefine-base-resnet50-moe_twostage         --model-last-checkpoint "./checkpoint/mattingbase-resnet50-videomatte240k/epoch-7.pth"         --epoch-end 2  --num-experts 3
+CUDA_VISIBLE_DEVICES=0,1 python train_refine_multi.py \
+        --dataset-name videomatte240k \
+        --model-backbone resnet50 \
+        --model-name mattingrefine-resnet50-videomatte240k \
+        --model-last-checkpoint "mattingbase-resnet50-videomatte240k/epoch-7.pth" \
+        --epoch-end 1 \
+        --num-experts 4
 
 """
 import numpy as np
@@ -29,14 +35,18 @@ from torch.optim import Adam
 from torchvision.utils import make_grid
 from tqdm import tqdm
 from torchvision import transforms as T
+from PIL import Image
+from model.autoencoder import Autoencoder
 from data_path import DATA_PATH
 from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset
 from dataset import augmentation as A
+from model import MattingRefine
 from model.utils import load_matched_state_dict
+from model import MoE_kmeans
 import warnings
-from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset
+from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset, ImagesDataset_addname
 import pandas as pd
-from model import MoE
+
 warnings.filterwarnings("ignore")
 # --------------- Arguments ---------------
 
@@ -55,7 +65,7 @@ parser.add_argument('--model-name', type=str, required=True)
 parser.add_argument('--model-last-checkpoint', type=str, default=None)
 
 parser.add_argument('--batch-size', type=int, default=4)
-parser.add_argument('--num-workers', type=int, default=12)
+parser.add_argument('--num-workers', type=int, default=2)
 parser.add_argument('--epoch-start', type=int, default=0)
 parser.add_argument('--epoch-end', type=int, required=True)
 
@@ -71,7 +81,6 @@ distributed_num_gpus = torch.cuda.device_count()
 assert args.batch_size % distributed_num_gpus == 0
 
 
-
 # --------------- Main ---------------
 
 def train_worker(rank, addr, port):
@@ -82,26 +91,16 @@ def train_worker(rank, addr, port):
 
     # Training DataLoader
     dataset_train = ZipDataset([
-        ZipDataset([
-            ImagesDataset(DATA_PATH[args.dataset_name]['train']['pha'], mode='L'),
-            ImagesDataset(DATA_PATH[args.dataset_name]['train']['fgr'], mode='RGB'),
-        ], transforms=A.PairCompose([
-            A.PairRandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.3, 1), shear=(-5, 5)),
-            A.PairRandomHorizontalFlip(),
-            A.PairRandomBoxBlur(0.1, 5),
-            A.PairRandomSharpen(0.1),
-            A.PairApplyOnlyAtIndices([1], T.ColorJitter(0.15, 0.15, 0.15, 0.05)),
-            A.PairApply(T.ToTensor())
-        ]), assert_equal_length=True),
-        ImagesDataset(DATA_PATH['backgrounds']['train'], mode='RGB', transforms=T.Compose([
-            A.RandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(1, 2), shear=(-5, 5)),
-            T.RandomHorizontalFlip(),
-            A.RandomBoxBlur(0.1, 5),
-            A.RandomSharpen(0.1),
-            T.ColorJitter(0.15, 0.15, 0.15, 0.05),
-            T.ToTensor()
-        ])),
-    ])
+        ImagesDataset(DATA_PATH[args.dataset_name]['train']['pha'], mode='L'),
+        ImagesDataset(DATA_PATH[args.dataset_name]['train']['fgr'], mode='RGB'),
+    ], transforms=A.PairCompose([
+        A.PairRandomAffineAndResize((512, 512), degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.3, 1), shear=(-5, 5)),
+        A.PairRandomHorizontalFlip(),
+        A.PairRandomBoxBlur(0.1, 5),
+        A.PairRandomSharpen(0.1),
+        A.PairApplyOnlyAtIndices([1], T.ColorJitter(0.15, 0.15, 0.15, 0.05)),
+        A.PairApply(T.ToTensor())
+    ]), assert_equal_length=True)
 
     dataset_train_len_per_gpu_worker = int(len(dataset_train) / distributed_num_gpus)
     dataset_train = Subset(dataset_train, range(rank * dataset_train_len_per_gpu_worker,
@@ -112,24 +111,56 @@ def train_worker(rank, addr, port):
                                   drop_last=True,
                                   batch_size=args.batch_size // distributed_num_gpus,
                                   num_workers=args.num_workers // distributed_num_gpus)
+    dataset_train_bg = ImagesDataset_addname(DATA_PATH['backgrounds']['train'], mode='RGB', transforms=T.Compose([
+        A.RandomAffineAndResize((512, 512), degrees=(-5, 5), translate=(0.1, 0.1), scale=(1, 2), shear=(-5, 5)),
+        T.RandomHorizontalFlip(),
+        A.RandomBoxBlur(0.1, 5),
+        A.RandomSharpen(0.1),
+        T.ColorJitter(0.15, 0.15, 0.15, 0.05),
+        T.ToTensor()
+    ]))
+    dataset_train_len_per_gpu_worker_bg = int(len(dataset_train_bg) / distributed_num_gpus)
+    dataset_train_bg = Subset(dataset_train_bg, range(rank * dataset_train_len_per_gpu_worker_bg,
+                                                      (rank + 1) * dataset_train_len_per_gpu_worker_bg))
+    dataloader_train_bg = DataLoader(dataset_train_bg,
+                                     shuffle=False,
+                                     pin_memory=True,
+                                     drop_last=True,
+                                     batch_size=1,
+                                     num_workers=args.num_workers // distributed_num_gpus)
+
     # Model
-    model = MoE(6*484*452,
-                args.num_experts,
-                args.model_backbone,
-                args.model_backbone_scale,
-                args.model_refine_mode,
-                args.model_refine_sample_pixels,
-                args.model_refine_thresholding,
-                args.model_refine_kernel_size).cuda()
+    model = MoE_kmeans(args.num_experts,
+                         args.model_backbone,
+                         args.model_backbone_scale,
+                         args.model_refine_mode,
+                         args.model_refine_sample_pixels,
+                         args.model_refine_thresholding,
+                         args.model_refine_kernel_size)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model_distributed = nn.parallel.DistributedDataParallel(model.cuda(), device_ids=[rank],find_unused_parameters=True)
+    model_distributed = nn.parallel.DistributedDataParallel(model.cuda(), device_ids=[rank],
+                                                            find_unused_parameters=True)
 
     if args.model_last_checkpoint is not None:
         load_matched_state_dict(model.experts[0], torch.load(args.model_last_checkpoint))
         load_matched_state_dict(model.experts[1], torch.load(args.model_last_checkpoint))
         load_matched_state_dict(model.experts[2], torch.load(args.model_last_checkpoint))
 
-    optimizer = Adam(model.parameters(), lr=0.0005)
+    optimizer = Adam([
+        {'params': model.experts[0].backbone.parameters(), 'lr': 5e-5},
+        {'params': model.experts[0].aspp.parameters(), 'lr': 5e-5},
+        {'params': model.experts[0].decoder.parameters(), 'lr': 1e-4},
+        {'params': model.experts[0].refiner.parameters(), 'lr': 3e-4},
+        {'params': model.experts[1].backbone.parameters(), 'lr': 5e-5},
+        {'params': model.experts[1].aspp.parameters(), 'lr': 5e-5},
+        {'params': model.experts[1].decoder.parameters(), 'lr': 1e-4},
+        {'params': model.experts[1].refiner.parameters(), 'lr': 3e-4},
+        {'params': model.experts[2].backbone.parameters(), 'lr': 5e-5},
+        {'params': model.experts[2].aspp.parameters(), 'lr': 5e-5},
+        {'params': model.experts[2].decoder.parameters(), 'lr': 1e-4},
+        {'params': model.experts[2].refiner.parameters(), 'lr': 3e-4},
+    ])
+    scaler = GradScaler()
 
     # Logging and checkpoints
     if rank == 0:
@@ -139,12 +170,16 @@ def train_worker(rank, addr, port):
     # Run loop
 
     for epoch in range(args.epoch_start, args.epoch_end):
-        for i,  ((true_pha, true_fgr), true_bgr) in enumerate(tqdm(dataloader_train)):
+        for i, (true_pha, true_fgr) in enumerate(tqdm(dataloader_train)):
             step = epoch * len(dataloader_train) + i
             true_pha = true_pha.to(rank, non_blocking=True)
             true_fgr = true_fgr.to(rank, non_blocking=True)
+
+            true_bgr, names = next(iter(dataloader_train_bg))
+            true_bgr = torch.cat([true_bgr, true_bgr, true_bgr, true_bgr], dim=0)
             true_bgr = true_bgr.to(rank, non_blocking=True)
-            true_pha, true_fgr,true_bgr = random_crop(true_pha, true_fgr,true_bgr)
+
+            true_pha, true_fgr, true_bgr = random_crop(true_pha, true_fgr, true_bgr)
             true_src = true_bgr.clone()
             # Augment with shadow
             aug_shadow_idx = torch.rand(len(true_src)) < 0.3
@@ -178,13 +213,18 @@ def train_worker(rank, addr, port):
                 true_bgr[aug_affine_idx] = T.RandomAffine(degrees=(-1, 1), translate=(0.01, 0.01))(
                     true_bgr[aug_affine_idx])
             del aug_affine_idx
-            optimizer.zero_grad()
-            pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm,loss_= model_distributed(true_src,
-                                                                                              true_bgr)
-            loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha,
-                                true_fgr)+loss_
-            loss.backward()
-            optimizer.step()
+
+            with autocast():
+
+                pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model_distributed(true_src,
+                                                                                                 true_bgr, names)
+
+                loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha,
+                                    true_fgr)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
             if rank == 0:
                 if (i + 1) % args.log_train_loss_interval == 0:
@@ -230,7 +270,6 @@ def compute_loss(pred_pha_lg, pred_fgr_lg, pred_pha_sm, pred_fgr_sm, pred_err_sm
 
 
 def random_crop(*imgs):
-    random.seed(2023)
     H_src, W_src = imgs[0].shape[2:]
     W_tgt = random.choice(range(1024, 2048)) // 4 * 4
     H_tgt = random.choice(range(1024, 2048)) // 4 * 4
@@ -243,6 +282,26 @@ def random_crop(*imgs):
     return results
 
 
+def valid(model, dataloader, writer, step):
+    model.eval()
+    loss_total = 0
+    loss_count = 0
+    with torch.no_grad():
+        for (true_pha, true_fgr), true_bgr in dataloader:
+            batch_size = true_pha.size(0)
+
+            true_pha = true_pha.cuda(non_blocking=True)
+            true_fgr = true_fgr.cuda(non_blocking=True)
+            true_bgr = true_bgr.cuda(non_blocking=True)
+            true_src = true_pha * true_fgr + (1 - true_pha) * true_bgr
+
+            pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model(true_src, true_bgr)
+            loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha, true_fgr)
+            loss_total += loss.cpu().item() * batch_size
+            loss_count += batch_size
+
+    writer.add_scalar('valid_loss', loss_total / loss_count, step)
+    model.train()
 
 
 # --------------- Start ---------------
