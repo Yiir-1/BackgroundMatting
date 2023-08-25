@@ -29,7 +29,7 @@ from dataset import augmentation as A
 from model import MattingBase, MattingRefine
 from inference_utils import HomographicAlignment
 import os
-
+from data_path import DATA_PATH
 os.environ['CUDA_VISIBLE_DEVICES']='0'
 # --------------- Arguments ---------------
 
@@ -38,7 +38,7 @@ parser = argparse.ArgumentParser(description='Inference images')
 
 parser.add_argument('--model-backbone', type=str, required=True, choices=['resnet101', 'resnet50', 'mobilenetv2'])
 parser.add_argument('--model-backbone-scale', type=float, default=0.25)
-parser.add_argument('--model-checkpoint', type=str,default='checkpoint/mattingrefine-resent-moe-kmeans/epoch-1-iter-75999-loss0.005367898847907782-model.pth')
+parser.add_argument('--model-checkpoint', type=str,default='checkpoint/mattingrefine_resnet50_basemoe_kmeans/epoch-0-iter-55999-loss0.009505371563136578-model.pth')
 parser.add_argument('--model-refine-mode', type=str, default='sampling', choices=['full', 'sampling', 'thresholding'])
 parser.add_argument('--model-refine-sample-pixels', type=int, default=80_000)
 parser.add_argument('--model-refine-kernel-size', type=int, default=3)
@@ -72,12 +72,11 @@ model = MoE_kmeans(args.num_experts,
                 args.model_refine_kernel_size)
 model = model.to(device).eval()
 model.load_state_dict(torch.load(args.model_checkpoint, map_location=device), strict=False)
-
 dataset = ZipDataset_withname([
     ImagesDataset(args.images_src),
     ImagesDataset_addname(args.images_bgr),
-],assert_equal_length=True, transforms=A.PairCompose([
-    HomographicAlignment(),
+], assert_equal_length=True, transforms=A.PairCompose([
+    HomographicAlignment() if args.preprocess_alignment else A.PairApply(nn.Identity()),
     A.PairApply(T.ToTensor())
 ]))
 dataloader = DataLoader(dataset, batch_size=1, num_workers=args.num_workers, pin_memory=True)
@@ -101,8 +100,6 @@ def writer(img, path):
 
 with torch.no_grad():
     for i, ((src,bgr), names) in enumerate(tqdm(dataloader)):
-        src = torch.cat([src], dim=0)
-        bgr = torch.cat([bgr], dim=0)
         pathname = dataset.datasets[0].filenames[i]
         pathname = os.path.relpath(pathname, args.images_src)
         pathname = os.path.splitext(pathname)[0]

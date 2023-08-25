@@ -39,7 +39,7 @@ from torchvision import transforms as T
 from PIL import Image
 from model.autoencoder import Autoencoder
 from data_path import DATA_PATH
-from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset
+from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset,ZipDataset_withname
 from dataset import augmentation as A
 from model import MattingRefine, BaseMoE_kmeans
 from model.utils import load_matched_state_dict
@@ -66,7 +66,7 @@ parser.add_argument('--model-name', type=str, required=True)
 parser.add_argument('--model-last-checkpoint', type=str, default=None)
 
 parser.add_argument('--batch-size', type=int, default=4)
-parser.add_argument('--num-workers', type=int, default=2)
+parser.add_argument('--num-workers', type=int, default=8)
 parser.add_argument('--epoch-start', type=int, default=0)
 parser.add_argument('--epoch-end', type=int, required=True)
 
@@ -90,17 +90,27 @@ def train_worker(rank, addr, port):
     os.environ['MASTER_PORT'] = port
     dist.init_process_group("nccl", rank=rank, world_size=distributed_num_gpus)
     # Training DataLoader
-    dataset_train = ZipDataset([
-        ImagesDataset(DATA_PATH[args.dataset_name]['train']['pha'], mode='L'),
-        ImagesDataset(DATA_PATH[args.dataset_name]['train']['fgr'], mode='RGB'),
-    ], transforms=A.PairCompose([
-        A.PairRandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.3, 1), shear=(-5, 5)),
-        A.PairRandomHorizontalFlip(),
-        A.PairRandomBoxBlur(0.1, 5),
-        A.PairRandomSharpen(0.1),
-        A.PairApplyOnlyAtIndices([1], T.ColorJitter(0.15, 0.15, 0.15, 0.05)),
-        A.PairApply(T.ToTensor())
-    ]), assert_equal_length=True)
+    dataset_train = ZipDataset_withname([
+        ZipDataset([
+            ImagesDataset(DATA_PATH[args.dataset_name]['train']['pha'], mode='L'),
+            ImagesDataset(DATA_PATH[args.dataset_name]['train']['fgr'], mode='RGB'),
+        ], transforms=A.PairCompose([
+            A.PairRandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.3, 1), shear=(-5, 5)),
+            A.PairRandomHorizontalFlip(),
+            A.PairRandomBoxBlur(0.1, 5),
+            A.PairRandomSharpen(0.1),
+            A.PairApplyOnlyAtIndices([1], T.ColorJitter(0.15, 0.15, 0.15, 0.05)),
+            A.PairApply(T.ToTensor())
+        ]), assert_equal_length=True),
+        ImagesDataset_addname(DATA_PATH['backgrounds']['train'], mode='RGB', transforms=T.Compose([
+            A.RandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(1, 2), shear=(-5, 5)),
+            T.RandomHorizontalFlip(),
+            A.RandomBoxBlur(0.1, 5),
+            A.RandomSharpen(0.1),
+            T.ColorJitter(0.15, 0.15, 0.15, 0.05),
+            T.ToTensor()
+        ])),
+    ])
     dataset_train_len_per_gpu_worker = int(len(dataset_train) / distributed_num_gpus)
     dataset_train = Subset(dataset_train, range(rank * dataset_train_len_per_gpu_worker,
                                                 (rank + 1) * dataset_train_len_per_gpu_worker))
@@ -108,26 +118,8 @@ def train_worker(rank, addr, port):
                                   shuffle=False,
                                   pin_memory=True,
                                   drop_last=True,
-                                  batch_size=args.batch_size // distributed_num_gpus,
+                                  batch_size=1,
                                   num_workers=args.num_workers // distributed_num_gpus)
-    dataset_train_bg = ImagesDataset_addname(DATA_PATH['backgrounds']['train'], mode='RGB', transforms=T.Compose([
-        A.RandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(1, 2), shear=(-5, 5)),
-        T.RandomHorizontalFlip(),
-        A.RandomBoxBlur(0.1, 5),
-        A.RandomSharpen(0.1),
-        T.ColorJitter(0.15, 0.15, 0.15, 0.05),
-        T.ToTensor()
-    ]))
-    dataset_train_len_per_gpu_worker_bg = int(len(dataset_train_bg) / distributed_num_gpus)
-    dataset_train_bg = Subset(dataset_train_bg, range(rank * dataset_train_len_per_gpu_worker_bg,
-                                                      (rank + 1) * dataset_train_len_per_gpu_worker_bg))
-    dataloader_train_bg = DataLoader(dataset_train_bg,
-                                     shuffle=False,
-                                     pin_memory=True,
-                                     drop_last=True,
-                                     batch_size=1,
-                                     num_workers=args.num_workers // distributed_num_gpus)
-
     # Model
     model = BaseMoE_kmeans(args.num_experts,
                          args.model_backbone,
@@ -167,77 +159,79 @@ def train_worker(rank, addr, port):
     # Run loop
 
     for epoch in range(args.epoch_start, args.epoch_end):
-        for i, (true_pha, true_fgr) in enumerate(tqdm(dataloader_train)):
-            for j ,(true_bgr, names)in enumerate(dataloader_train_bg):
-                step = epoch * len(dataloader_train) + i
-                true_pha = true_pha.to(rank, non_blocking=True)
-                true_fgr = true_fgr.to(rank, non_blocking=True)
-                names=names[0].split("/")[5]
-                true_bgr = torch.cat([true_bgr, true_bgr, true_bgr, true_bgr], dim=0)
-                true_bgr = true_bgr.to(rank, non_blocking=True)
-                true_pha, true_fgr, true_bgr = random_crop(true_pha, true_fgr, true_bgr)
-                true_src = true_bgr.clone()
-                # Augment with shadow
-                aug_shadow_idx = torch.rand(len(true_src)) < 0.3
-                if aug_shadow_idx.any():
-                    aug_shadow = true_pha[aug_shadow_idx].mul(0.3 * random.random())
-                    aug_shadow = T.RandomAffine(degrees=(-5, 5), translate=(0.2, 0.2), scale=(0.5, 1.5), shear=(-5, 5))(
-                        aug_shadow)
-                    aug_shadow = kornia.filters.box_blur(aug_shadow, (random.choice(range(20, 40)),) * 2)
-                    true_src[aug_shadow_idx] = true_src[aug_shadow_idx].sub_(aug_shadow).clamp_(0, 1)
-                    del aug_shadow
-                del aug_shadow_idx
-                # # Composite foreground onto source
-                true_src = true_fgr * true_pha + true_src * (1 - true_pha)
-                # Augment with noise
-                aug_noise_idx = torch.rand(len(true_src)) < 0.4
-                if aug_noise_idx.any():
-                    true_src[aug_noise_idx] = true_src[aug_noise_idx].add_(
-                        torch.randn_like(true_src[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
-                    true_bgr[aug_noise_idx] = true_bgr[aug_noise_idx].add_(
-                        torch.randn_like(true_bgr[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
-                del aug_noise_idx
-                # Augment background with jitter
-                aug_jitter_idx = torch.rand(len(true_src)) < 0.8
-                if aug_jitter_idx.any():
-                    true_bgr[aug_jitter_idx] = kornia.augmentation.ColorJitter(0.18, 0.18, 0.18, 0.1)(
-                        true_bgr[aug_jitter_idx])
-                del aug_jitter_idx
-                # Augment background with affine
-                aug_affine_idx = torch.rand(len(true_bgr)) < 0.3
-                if aug_affine_idx.any():
-                    true_bgr[aug_affine_idx] = T.RandomAffine(degrees=(-1, 1), translate=(0.01, 0.01))(
-                        true_bgr[aug_affine_idx])
-                del aug_affine_idx
+        for i, ((temp,true_bgr), names) in enumerate(tqdm(dataloader_train)):
+            true_pha=temp[0]
+            true_fgr=temp[1]
+            step = epoch * len(dataloader_train) + i
+            names=names[0].split("/")[5]
+            true_pha = torch.cat([true_pha, true_pha], dim=0)
+            true_fgr = torch.cat([true_fgr, true_fgr], dim=0)
+            true_bgr = torch.cat([true_bgr, true_bgr], dim=0)
+            true_bgr = true_bgr.to(rank, non_blocking=True)
+            true_pha = true_pha.to(rank, non_blocking=True)
+            true_fgr = true_fgr.to(rank, non_blocking=True)
+            true_pha, true_fgr, true_bgr = random_crop(true_pha, true_fgr, true_bgr)
+            true_src = true_bgr.clone()
+            # Augment with shadow
+            aug_shadow_idx = torch.rand(len(true_src)) < 0.3
+            if aug_shadow_idx.any():
+                aug_shadow = true_pha[aug_shadow_idx].mul(0.3 * random.random())
+                aug_shadow = T.RandomAffine(degrees=(-5, 5), translate=(0.2, 0.2), scale=(0.5, 1.5), shear=(-5, 5))(
+                    aug_shadow)
+                aug_shadow = kornia.filters.box_blur(aug_shadow, (random.choice(range(20, 40)),) * 2)
+                true_src[aug_shadow_idx] = true_src[aug_shadow_idx].sub_(aug_shadow).clamp_(0, 1)
+                del aug_shadow
+            del aug_shadow_idx
+            # # Composite foreground onto source
+            true_src = true_fgr * true_pha + true_src * (1 - true_pha)
+            # Augment with noise
+            aug_noise_idx = torch.rand(len(true_src)) < 0.4
+            if aug_noise_idx.any():
+                true_src[aug_noise_idx] = true_src[aug_noise_idx].add_(
+                    torch.randn_like(true_src[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
+                true_bgr[aug_noise_idx] = true_bgr[aug_noise_idx].add_(
+                    torch.randn_like(true_bgr[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
+            del aug_noise_idx
+            # Augment background with jitter
+            aug_jitter_idx = torch.rand(len(true_src)) < 0.8
+            if aug_jitter_idx.any():
+                true_bgr[aug_jitter_idx] = kornia.augmentation.ColorJitter(0.18, 0.18, 0.18, 0.1)(
+                    true_bgr[aug_jitter_idx])
+            del aug_jitter_idx
+            # Augment background with affine
+            aug_affine_idx = torch.rand(len(true_bgr)) < 0.3
+            if aug_affine_idx.any():
+                true_bgr[aug_affine_idx] = T.RandomAffine(degrees=(-1, 1), translate=(0.01, 0.01))(
+                    true_bgr[aug_affine_idx])
+            del aug_affine_idx
 
-                with autocast():
-                    pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model_distributed(true_src,
-                                                                                                     true_bgr, names)
-                    loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha,
-                                        true_fgr)
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
+            with autocast():
+                pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model_distributed(true_src,
+                                                                                                 true_bgr, names)
+                loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha,
+                                    true_fgr)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-                if rank == 0:
-                    if (i + 1) % args.log_train_loss_interval == 0:
-                        writer.add_scalar('loss', loss, step)
+            if rank == 0:
+                if (i + 1) % args.log_train_loss_interval == 0:
+                    writer.add_scalar('loss', loss, step)
 
-                    if (i + 1) % args.log_train_images_interval == 0:
-                        writer.add_image('train_pred_pha', make_grid(pred_pha, nrow=5), step)
-                        writer.add_image('train_pred_fgr', make_grid(pred_fgr, nrow=5), step)
-                        writer.add_image('train_pred_com', make_grid(pred_fgr * pred_pha, nrow=5), step)
-                        writer.add_image('train_pred_err', make_grid(pred_err_sm, nrow=5), step)
-                        writer.add_image('train_true_src', make_grid(true_src, nrow=5), step)
+                if (i + 1) % args.log_train_images_interval == 0:
+                    writer.add_image('train_pred_pha', make_grid(pred_pha, nrow=5), step)
+                    writer.add_image('train_pred_fgr', make_grid(pred_fgr, nrow=5), step)
+                    writer.add_image('train_pred_com', make_grid(pred_fgr * pred_pha, nrow=5), step)
+                    writer.add_image('train_pred_err', make_grid(pred_err_sm, nrow=5), step)
+                    writer.add_image('train_true_src', make_grid(true_src, nrow=5), step)
 
-                    del true_pha, true_fgr, true_src, true_bgr
-                    del pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm
+                del true_pha, true_fgr, true_src, true_bgr
+                del pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm
 
-                    if (step + 1) % args.checkpoint_interval == 0:
-                        torch.save(model.state_dict(),
-                                   f'checkpoint/{args.model_name}/epoch-{epoch}-iter-{step}-loss{loss}-model.pth')
-                break
+                if (step + 1) % args.checkpoint_interval == 0:
+                    torch.save(model.state_dict(),
+                               f'checkpoint/{args.model_name}/epoch-{epoch}-iter-{step}-loss{loss}-model.pth')
         if rank == 0:
             torch.save(model.state_dict(), f'checkpoint/{args.model_name}/epoch-{epoch}-model.pth')
 

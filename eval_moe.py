@@ -10,14 +10,14 @@ from tqdm import tqdm
 from torchvision import transforms as T
 from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset
 from dataset import augmentation as A
-from model import MoE
+from model import BaseMoE_kmeans
 from metric import *
 
 
 # --------------- Arguments ---------------
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-path', type=str, default='./data')
-parser.add_argument('--model-path', type=str, default='checkpoint/mattingrefine_resnet50_moe3/epoch-0-iter-17999-loss1.9135754108428955-model.pth')
+parser.add_argument('--model-path', type=str, default='checkpoint/mattingrefine_resnet50_basemoe_kmeans/epoch-0-iter-55999-loss0.009505371563136578-model.pth')
 parser.add_argument('--model-backbone', type=str,default='resnet50', choices=['resnet101', 'resnet50', 'mobilenetv2'])
 parser.add_argument('--model-backbone-scale', type=float, default=0.25)
 parser.add_argument('--model-refine-mode', type=str, default='sampling', choices=['full', 'sampling', 'thresholding'])
@@ -52,7 +52,7 @@ def eval():
                                   drop_last=True,
                                   batch_size=args.batch_size)
 
-    model = MoE(6 * 484 * 452,
+    model = BaseMoE_kmeans(
                 args.num_experts,
                 args.model_backbone,
                 args.model_backbone_scale,

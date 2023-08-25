@@ -62,7 +62,7 @@ DATA_PATH = {
         },
     },
     'backgrounds': {
-        'train': './bg_temp',
-        'valid': './bg_temp'
+        'train': './Background/train',
+        'valid': './Background/train'
     },
 }
