@@ -23,7 +23,7 @@ from torchvision import transforms as T
 from torchvision.transforms.functional import to_pil_image
 from threading import Thread
 from tqdm import tqdm
-from model import MoE_kmeans
+from model import MoE_kmeans, BaseMoE_kmeans
 from dataset import ImagesDataset, ZipDataset,ImagesDataset_addname,ZipDataset_withname
 from dataset import augmentation as A
 from model import MattingBase, MattingRefine
@@ -38,7 +38,7 @@ parser = argparse.ArgumentParser(description='Inference images')
 
 parser.add_argument('--model-backbone', type=str, required=True, choices=['resnet101', 'resnet50', 'mobilenetv2'])
 parser.add_argument('--model-backbone-scale', type=float, default=0.25)
-parser.add_argument('--model-checkpoint', type=str,default='checkpoint/mattingrefine_resnet50_basemoe_kmeans/epoch-0-iter-55999-loss0.009505371563136578-model.pth')
+parser.add_argument('--model-checkpoint', type=str,default='checkpoint/mattingrefine-mobilnet-moe-kmeans/epoch-0-iter-149999-loss0.017192557454109192-model.pth')
 parser.add_argument('--model-refine-mode', type=str, default='sampling', choices=['full', 'sampling', 'thresholding'])
 parser.add_argument('--model-refine-sample-pixels', type=int, default=80_000)
 parser.add_argument('--model-refine-kernel-size', type=int, default=3)
@@ -63,7 +63,7 @@ args = parser.parse_args()
 device = torch.device(args.device)
 
 # Load model
-model = MoE_kmeans(args.num_experts,
+model = BaseMoE_kmeans(args.num_experts,
                 args.model_backbone,
                 args.model_backbone_scale,
                 args.model_refine_mode,

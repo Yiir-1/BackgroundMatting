@@ -8,9 +8,9 @@ Example:
 
 CUDA_VISIBLE_DEVICES=0,1 python train_refine_basemoe_kmeans.py \
         --dataset-name videomatte240k \
-        --model-backbone resnet50 \
-        --model-name mattingrefine-resnet50-videomatte240k \
-        --model-last-checkpoint "mattingbase-resnet50-videomatte240k/epoch-7.pth" \
+        --model-backbone mobilenetv2 \
+        --model-name mattingrefine-mobilnetv2-basemoe \
+        --model-last-checkpoint "/hy-tmp/BackgroundMattingV2/checkpoint/mattingbase-mobilenetv2-videomatte240k/epoch-7.pth" \
         --epoch-end 1 \
         --num-experts 3
 
@@ -133,21 +133,21 @@ def train_worker(rank, addr, port):
                                                             find_unused_parameters=True)
 
     if args.model_last_checkpoint is not None:
-        load_matched_state_dict(model.experts[0], torch.load(args.model_last_checkpoint))
-        load_matched_state_dict(model.experts[1], torch.load(args.model_last_checkpoint))
-        load_matched_state_dict(model.experts[2], torch.load(args.model_last_checkpoint))
+        load_matched_state_dict(model.expert_layers[0].expert_layer, torch.load(args.model_last_checkpoint))
+        load_matched_state_dict(model.expert_layers[1].expert_layer, torch.load(args.model_last_checkpoint))
+        load_matched_state_dict(model.expert_layers[2].expert_layer, torch.load(args.model_last_checkpoint))
 
     optimizer = Adam([
-        {'params': model.experts[0].backbone.parameters(), 'lr': 5e-5},
-        {'params': model.experts[0].aspp.parameters(), 'lr': 5e-5},
-        {'params': model.experts[0].decoder.parameters(), 'lr': 1e-4},
-        {'params': model.experts[1].backbone.parameters(), 'lr': 5e-5},
-        {'params': model.experts[1].aspp.parameters(), 'lr': 5e-5},
-        {'params': model.experts[1].decoder.parameters(), 'lr': 1e-4},
-        {'params': model.experts[2].backbone.parameters(), 'lr': 5e-5},
-        {'params': model.experts[2].aspp.parameters(), 'lr': 5e-5},
-        {'params': model.experts[2].decoder.parameters(), 'lr': 1e-4},
-        {'params': model.refine.parameters(), 'lr': 3e-4},
+        {'params': model.expert_layers[0].expert_layer.backbone.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[0].expert_layer.aspp.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[0].expert_layer.decoder.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[1].expert_layer.backbone.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[1].expert_layer.aspp.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[1].expert_layer.decoder.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[2].expert_layer.backbone.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[2].expert_layer.aspp.parameters(), 'lr': 1e-5},
+        {'params': model.expert_layers[2].expert_layer.decoder.parameters(), 'lr': 1e-5},
+        {'params': model.refine.parameters(), 'lr': 5e-4},
     ])
     scaler = GradScaler()
 
@@ -204,16 +204,15 @@ def train_worker(rank, addr, port):
                 true_bgr[aug_affine_idx] = T.RandomAffine(degrees=(-1, 1), translate=(0.01, 0.01))(
                     true_bgr[aug_affine_idx])
             del aug_affine_idx
+            optimizer.zero_grad()
+            pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model_distributed(true_src,
+                                                                                             true_bgr, names)
+            loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha,
+                                true_fgr)
+            time.sleep(0.1)
+            loss.backward()
+            optimizer.step()
 
-            with autocast():
-                pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, _ = model_distributed(true_src,
-                                                                                                 true_bgr, names)
-                loss = compute_loss(pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm, true_pha,
-                                    true_fgr)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
 
             if rank == 0:
                 if (i + 1) % args.log_train_loss_interval == 0:

@@ -25,14 +25,13 @@ from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset
 from dataset import augmentation as A
 from model import MattingBase, MattingRefine
 from metric import *
-from ptflops import get_model_complexity_info
 from torchsummary import summary
 import time
 # --------------- Arguments ---------------
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-path', type=str, default='./evaldata')
-parser.add_argument('--model-path', type=str, default='./pretrain/pytorch_resnet50.pth')
-parser.add_argument('--model-backbone', type=str,default='resnet50', choices=['resnet101', 'resnet50', 'mobilenetv2'])
+parser.add_argument('--data-path', type=str, default='./data')
+parser.add_argument('--model-path', type=str, default='checkpoint/mattingrefine-mobilnet/epoch-0.pth')
+parser.add_argument('--model-backbone', type=str,default='mobilenetv2', choices=['resnet101', 'resnet50', 'mobilenetv2'])
 parser.add_argument('--model-backbone-scale', type=float, default=0.25)
 parser.add_argument('--model-refine-mode', type=str, default='sampling', choices=['full', 'sampling', 'thresholding'])
 parser.add_argument('--model-refine-sample-pixels', type=int, default=80000)
@@ -51,11 +50,11 @@ def eval():
             ImagesDataset(os.path.join(args.data_path, 'pha'), mode='L'),
             ImagesDataset(os.path.join(args.data_path, 'fgr'), mode='RGB')
         ], transforms=A.PairCompose([
-            A.PairRandomAffineAndResize((512, 512), degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.55, 0.9), shear=(-5, 5)),
+            A.PairRandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.3, 1), shear=(-5, 5)),
             A.PairApply(T.ToTensor())
         ]), assert_equal_length=True),
         ImagesDataset(os.path.join(args.data_path, 'Backgrounds'), mode='RGB', transforms=T.Compose([
-            A.RandomAffineAndResize((512, 512), degrees=(-5, 5), translate=(0.1, 0.1), scale=(1, 1.2), shear=(-5, 5)),
+            A.RandomAffineAndResize((2048, 2048), degrees=(-5, 5), translate=(0.1, 0.1), scale=(1, 1.2), shear=(-5, 5)),
             T.ToTensor()
         ])),
     ])
@@ -84,29 +83,24 @@ def paddle_valid(dataloader):
         args.model_refine_mode,
         args.model_refine_sample_pixels,
         args.model_refine_threshold,
-        args.model_refine_kernel_size)
-    summary(model, input_size=[(3, 512, 512),(3,512,512)], batch_size=2, device="cpu")
+        args.model_refine_kernel_size
+        )
     device = torch.device(args.device)
     model.load_state_dict(torch.load(args.model_path, map_location=device), strict=False)
     
-    
-    macs, params = get_model_complexity_info(model, (3, 512, 512),input_constructor=prepare_input, as_strings=True,
-                                           print_per_layer_stat=True, verbose=True)
-    print('{:<30}  {:<8}'.format('Computational complexity: ', macs))
-    print('{:<30}  {:<8}'.format('Number of parameters: ', params))
-    
-    
+
     
     model.eval()
     loss_count = 0
-    sad = 0
-    mse = 0
-    fps=0.0
+    sad_total = 0
+    mse_total = 0
+    gra_total = 0
+    conn_total = 0
+
     with torch.no_grad():
         
         for true_pha, true_fgr, true_bgr in tqdm(dataloader):
-            
-            t1 = time.time()
+
             true_pha = torch.tensor(true_pha)
             true_fgr = torch.tensor(true_fgr)
             true_bgr = torch.tensor(true_bgr)
@@ -118,11 +112,22 @@ def paddle_valid(dataloader):
             trimap = gen_trimap(img)
             mask_pha = torch.tensor([trimap]).unsqueeze(1)
 
-            sad += BatchSAD(pred_pha, true_pha, mask_pha)
-            mse += BatchMSE(pred_pha, true_pha, mask_pha)
+            sad = BatchSAD(pred_pha, true_pha, mask_pha)
+            mse = BatchMSE(pred_pha, true_pha, mask_pha)
+            pred_pha1 = pred_pha.reshape((pred_pha.shape[2], -1))
+            true_pha1 = true_pha.reshape((true_pha.shape[2], -1))
+            mask_pha1 = mask_pha.reshape((mask_pha.shape[2], -1))
+            gra = gradient(pred_pha1, true_pha1, mask_pha1)
+            conn = connectivity_loss(pred_pha1, true_pha1, mask_pha1)
+            sad_total = sad_total + sad
+            mse_total = mse_total + mse
+            gra_total = gra_total + gra
+            conn_total = conn_total + conn
             loss_count += 1
-            fps = (fps + (1. / (time.time() - t1))) / 2
-    return sad, mse,fps
+            # print(f'output:  SAD: {sad}, MSE: {mse} , Grad: {gra}, Conn: {conn}')
+            print(f'output:  SAD: {sad_total/loss_count}, MSE: {mse_total/loss_count} , Grad: {gra_total/loss_count}, Conn: {conn_total/loss_count}')
+
+    return sad, mse
 
 
 # --------------- Start ---------------

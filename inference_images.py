@@ -50,15 +50,15 @@ parser.add_argument('--model-refine-sample-pixels', type=int, default=80_000)
 parser.add_argument('--model-refine-threshold', type=float, default=0.7)
 parser.add_argument('--model-refine-kernel-size', type=int, default=3)
 
-parser.add_argument('--images-src', type=str, required=True)
-parser.add_argument('--images-bgr', type=str, required=True)
+parser.add_argument('--images-src', type=str, default='evaldata\\img')
+parser.add_argument('--images-bgr', type=str, default='evaldata\\bgr')
 
 parser.add_argument('--device', type=str, choices=['cpu', 'cuda'], default='cuda')
 parser.add_argument('--num-workers', type=int, default=0, 
     help='number of worker threads used in DataLoader. Note that Windows need to use single thread (0).')
 parser.add_argument('--preprocess-alignment', action='store_true')
 
-parser.add_argument('--output-dir', type=str, required=True)
+parser.add_argument('--output-dir', type=str, default='./output3')
 parser.add_argument('--output-types', type=str, required=True, nargs='+', choices=['com', 'pha', 'fgr', 'err', 'ref'])
 parser.add_argument('-y', action='store_true')
 

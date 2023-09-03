@@ -30,8 +30,8 @@ import pandas as pd
 # --------------- Arguments ---------------
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-path', type=str, default='./data')
-parser.add_argument('--model-path', type=str, default='checkpoint/mattingrefine_resnet50_basemoe_kmeans/epoch-1-iter-261999-loss0.005607639905065298-model.pth')
-parser.add_argument('--model-backbone', type=str,default='resnet50', choices=['resnet101', 'resnet50', 'mobilenetv2'])
+parser.add_argument('--model-path', type=str, default='checkpoint/mattingrefine-mobilnet-moe-kmeans/epoch-0-iter-149999-loss0.017192557454109192-model.pth')
+parser.add_argument('--model-backbone', type=str,default='mobilenetv2', choices=['resnet101', 'resnet50', 'mobilenetv2'])
 parser.add_argument('--model-backbone-scale', type=float, default=0.25)
 parser.add_argument('--model-refine-mode', type=str, default='sampling', choices=['full', 'sampling', 'thresholding'])
 parser.add_argument('--model-refine-sample-pixels', type=int, default=80000)
@@ -108,7 +108,7 @@ def eval():
             label = df[df['name'] == str(name)]['label'].values[0]
             del true_bgr
             print(f'output:  SAD: {sad}, MSE: {mse } , Grad: {gra }, Conn: {conn },label:{label}')
-            print(f'output:  SAD: {sad_total}, MSE: {mse_total } , Grad: {gra_total }, Conn: {conn_total },label:{label}')
+            print(f'output:  SAD: {sad_total/loss_count}, MSE: {mse_total/loss_count } , Grad: {gra_total/loss_count }, Conn: {conn_total/loss_count },label:{label}')
 
 
 # --------------- Start ---------------
